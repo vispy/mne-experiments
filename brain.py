@@ -47,27 +47,21 @@ varying vec4 v_color;
 void main()
 {
     // Calculate normal in world coordinates
-    vec3 normal = normalize(u_normal * vec4(v_normal,1.0)).xyz;
+    vec3 normal = normalize((u_normal * vec4(v_normal,1.0)).xyz);
 
     // Calculate the location of this fragment (pixel) in world coordinates
     vec3 position = vec3(u_view*u_model * vec4(v_position, 1));
 
     // Calculate the vector from this pixels surface to the light source
-    vec3 surfaceToLight = u_light_position - position;
+    vec3 surfaceToLight = normalize(vec4(u_light_position, 1.0) - position);
 
     // Calculate the cosine of the angle of incidence (brightness)
-    float brightness = dot(normal, surfaceToLight) /
-                      (length(surfaceToLight) * length(normal));
+    float brightness = dot(normal, surfaceToLight);
     brightness = max(min(brightness,1.0),0.0);
 
-    // Calculate final color of the pixel, based on:
-    // 1. The angle of incidence: brightness
-    // 2. The color/intensities of the light: light.intensities
-    // 3. The texture and texture coord: texture(tex, fragTexCoord)
-
     // Specular lighting.
-    vec3 surfaceToCamera = vec3(0.0, 0.0, 1.0) - position;
-    vec3 K = normalize(normalize(surfaceToLight) + normalize(surfaceToCamera));
+    vec3 surfaceToCamera = normalize(u_view*vec4(0.0, 0.0, 0.0, 1.0) - position);
+    vec3 K = normalize(surfaceToLight + surfaceToCamera);
     float specular = clamp(pow(abs(dot(normal, K)), 40.), 0.0, 1.0);
     
     gl_FragColor = v_color * brightness * vec4(u_light_intensity, 1) +
