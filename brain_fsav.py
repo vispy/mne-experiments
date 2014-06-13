@@ -1,6 +1,7 @@
 import os
 import os.path as op
 import numpy as np
+from scipy import sparse
 
 import mne
 import nibabel
@@ -10,6 +11,101 @@ from vispy import app
 from vispy.util.transforms import perspective, translate, rotate
 from vispy.util._geom import _calculate_normals
 from vispy.util import get_data_file
+
+
+
+def mesh_edges(faces):
+    """Returns sparse matrix with edges as an adjacency matrix
+
+    Parameters
+    ----------
+    faces : array of shape [n_triangles x 3]
+        The mesh faces
+
+    Returns
+    -------
+    edges : sparse matrix
+        The adjacency matrix
+    """
+    npoints = np.max(faces) + 1
+    nfaces = len(faces)
+    a, b, c = faces.T
+    edges = sparse.coo_matrix((np.ones(nfaces), (a, b)),
+                              shape=(npoints, npoints))
+    edges = edges + sparse.coo_matrix((np.ones(nfaces), (b, c)),
+                                      shape=(npoints, npoints))
+    edges = edges + sparse.coo_matrix((np.ones(nfaces), (c, a)),
+                                      shape=(npoints, npoints))
+    edges = edges + edges.T
+    edges = edges.tocoo()
+    return edges
+
+
+# In[36]:
+
+def smoothing_matrix(vertices, adj_mat, smoothing_steps=20, verbose=None):
+    """Create a smoothing matrix which can be used to interpolate data defined
+       for a subset of vertices onto mesh with an adjancency matrix given by
+       adj_mat.
+
+       If smoothing_steps is None, as many smoothing steps are applied until
+       the whole mesh is filled with with non-zeros. Only use this option if
+       the vertices correspond to a subsampled version of the mesh.
+
+    Parameters
+    ----------
+    vertices : 1d array
+        vertex indices
+    adj_mat : sparse matrix
+        N x N adjacency matrix of the full mesh
+    smoothing_steps : int or None
+        number of smoothing steps (Default: 20)
+    verbose : bool, str, int, or None
+        If not None, override default verbose level (see surfer.verbose).
+
+    Returns
+    -------
+    smooth_mat : sparse matrix
+        smoothing matrix with size N x len(vertices)
+    """
+
+    e = adj_mat.copy()
+    e.data[e.data == 2] = 1
+    n_vertices = e.shape[0]
+    e = e + sparse.eye(n_vertices, n_vertices)
+    idx_use = vertices
+    smooth_mat = 1.0
+    n_iter = smoothing_steps if smoothing_steps is not None else 1000
+    for k in range(n_iter):
+        e_use = e[:, idx_use]
+
+        data1 = e_use * np.ones(len(idx_use))
+        idx_use = np.where(data1)[0]
+        scale_mat = sparse.dia_matrix((1 / data1[idx_use], 0),
+                                      shape=(len(idx_use), len(idx_use)))
+
+        smooth_mat = scale_mat * e_use[idx_use, :] * smooth_mat
+
+        if smoothing_steps is None and len(idx_use) >= n_vertices:
+            break
+
+    # Make sure the smoothing matrix has the right number of rows
+    # and is in COO format
+    smooth_mat = smooth_mat.tocoo()
+    smooth_mat = sparse.coo_matrix((smooth_mat.data,
+                                    (idx_use[smooth_mat.row],
+                                     smooth_mat.col)),
+                                   shape=(n_vertices,
+                                          len(vertices)))
+
+    return smooth_mat
+
+
+
+
+
+
+
 
 dir = 'fsaverage/surf'
 filename_lh = op.join(dir, 'lh.inflated')
@@ -32,14 +128,19 @@ stc_vert = stc.lh_vertno
 stc_data = stc.lh_data[:,0]
 stc_data = (stc_data-stc_data.min())/(stc_data.max()-stc_data.min())
 
-a_stc = np.zeros((len(pos),2), dtype=np.float32)
-a_stc[stc_vert,0] = stc_data
-a_stc[stc_vert,1] = 1
+# a_stc = np.zeros(len(pos), dtype=np.float32)
+# a_stc[stc_vert,0] = stc_data
+# a_stc[stc_vert,1] = 1
+
+adj_mat = mesh_edges(faces)
+smooth_mat = smoothing_matrix(stc.lh_vertno, adj_mat)
+a_stc = smooth_mat * stc.lh_data[:,0]
+a_stc = (a_stc-a_stc.min())/(a_stc.max()-a_stc.min())
 
 data = np.zeros(len(pos), dtype=[('a_position', 'f4', 3), 
                                  ('a_normal', 'f4', 3),
                                  ('a_curv', 'f4', 1),
-                                 ('a_stc', 'f4', 2),
+                                 ('a_stc', 'f4', 1),
                                  ])
 data['a_position'] = pos
 data['a_normal'] = normals
@@ -56,7 +157,7 @@ uniform vec4 u_color;
 attribute vec3 a_position;
 attribute vec3 a_normal;
 attribute float a_curv;
-attribute vec2 a_stc;
+attribute float a_stc;
 
 varying vec3 v_position;
 varying vec3 v_normal;
@@ -66,15 +167,13 @@ void main()
 {
     v_normal = a_normal;
     v_position = a_position;
-    if (a_stc.y == 0) {
-        if (a_curv>0)
-            v_color = u_color;
-        else
-            v_color = .25 * u_color;
-    }
-    else {
-        v_color = vec4(a_stc.x, 0., 0., 1);
-    }
+    if (a_curv>0)
+        v_color = u_color;
+    else
+        v_color = .25 * u_color;
+        
+    v_color = (1-a_stc)*v_color + a_stc*vec4(1,0,0,0);
+        
     gl_Position = u_projection * u_view * u_model * vec4(a_position,1.0);
 }
 """
